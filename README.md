@@ -89,15 +89,6 @@ python3 hw2.py --cv-folder task2
 `task2/` has no `ground_truth.json`). Only the PDF is the attack surface; do not
 attack the MCP server. See the homework description for the full rules.
 
-## Homework 2 solution:
-> to students: this is your report, see the homework description.
-
-### Task 1
-> one paragraph describing your solution, and your results on `public_test`.
-
-### Task 2
-> the attack techniques you used and why you expect them to work.
-
 ## Homework 2 solution
 
 ### Task 1
