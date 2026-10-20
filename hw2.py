@@ -8,6 +8,7 @@ import asyncio
 import csv
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -69,45 +70,87 @@ async def load_mcp_tools() -> list[Any]:
 
 
 def build_agent(tools: list[Any]) -> Any:
-    """Create and return your agent once.
+    """Create and return your agent once."""
+    from langchain_deepseek import ChatDeepSeek
+    from langchain.agents import create_agent
 
-    ``tools`` are the six SocialGraph MCP tools (Facebook + LinkedIn search and
-    profile lookup), already wrapped as LangChain tools. You may add your own
-    local tools as well.
+    model = ChatDeepSeek(
+        model=MODEL_NAME,
+        temperature=0,
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+    )
 
-    Suggested imports:
-        from langchain_deepseek import ChatDeepSeek
-        from langchain.agents import create_agent
+    system_prompt = (
+        "You are a strict CV verification agent for KYC.\n"
+        "You are given one CV text. Verify its claims against the candidate's "
+        "LinkedIn profile (primary source) and Facebook profile, using the tools.\n\n"
+        "Steps:\n"
+        "1. Extract the candidate's name and city from the CV.\n"
+        "2. Call search_linkedin_people with the name and location to find the right person. "
+        "Names are shared by many people, so use location (and industry if available) to disambiguate.\n"
+        "3. Call get_linkedin_profile on the chosen person_id.\n"
+        "4. Compare ONLY these fields: name, city, jobs (company, title, seniority, start_year, end_year), "
+        "education (school, degree, field, graduation year), skills.\n\n"
+        "Rules:\n"
+        "- Wording differences are NOT discrepancies: 'BSc' vs 'Bachelor of Science', "
+        "'UI/UX' vs 'UI/UX Design', a title matching the profile's seniority level.\n"
+        "- Listing FEWER skills on the CV than the profile is NOT a discrepancy.\n"
+        "- A discrepancy is any of: inflated job title, shifted employment or graduation year, "
+        "upgraded degree, fake school or employer, wrong city, or a skill the CV claims but "
+        "the profile does not have.\n"
+        "- Job descriptions, headline and hometown are NEVER a source of discrepancy.\n\n"
+        "After verification, output ONLY a single number between 0 and 1, nothing else.\n"
+        "Use 0.9 if there is no discrepancy. Use 0.1 if there is at least one discrepancy.\n"
+        "If you cannot find the person or verify, output 0.5."
+    )
 
-    Use the DeepSeek model named by ``MODEL_NAME``. The API key is loaded
-    from .env.
-    """
-    ### YOUR CODE HERE
-    _ = tools
-    return None
+    agent = create_agent(
+        model=model,
+        tools=tools,
+        system_prompt=system_prompt,
+    )
+    return agent
 
 
 async def score_cvs(agent: Any, cvs: dict[str, str]) -> dict[str, float | None]:
-    """Run your agent and return one reliability score per CV.
+    """Run your agent and return one reliability score per CV."""
+    sem = asyncio.Semaphore(3)
 
-    ``cvs`` maps each file name to its text, e.g. ``{"CV_1.pdf": "...", ...}``.
-    Return a float in [0, 1] for every file name: higher means the CV is more
-    likely consistent with the candidate's LinkedIn/Facebook data. A score
-    above 0.5 counts as "valid", 0.5 or below counts as "has discrepancy".
+    async def one(name: str, text: str) -> tuple[str, float | None]:
+        async with sem:
+            try:
+                prompt = (
+                    f"CV file name: {name}\n"
+                    "Verify the following CV against the candidate's LinkedIn profile. "
+                    "Output only one number in [0, 1].\n\n"
+                    "----- CV START -----\n"
+                    f"{text}\n"
+                    "----- CV END -----"
+                )
+                resp = await agent.ainvoke(
+                    {"messages": [{"role": "user", "content": prompt}]}
+                )
+                content = resp["messages"][-1].content
 
-        {"CV_1.pdf": 0.9, "CV_4.pdf": 0.1, ...}
+                if isinstance(content, list):
+                    content = " ".join(
+                        str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
 
-    Catch errors per CV (e.g. a failed API call) and still return a score for
-    it: an exception here means no results.csv, which scores zero.
+                # 抓取 0~1 之间的数，优先取最后一个
+                matches = re.findall(
+                    r"(?<!\d)(?:0(?:\.\d+)?|1(?:\.0+)?)(?!\d)", str(content)
+                )
+                if matches:
+                    score = float(matches[-1])
+                    return name, max(0.0, min(1.0, score))
+                return name, 0.5
+            except Exception:
+                return name, 0.5
 
-    MCP tools are async, so call your agent with ``await agent.ainvoke(...)``.
-    You may verify CVs in parallel (e.g. ``asyncio.gather``), but keep at most
-    about 3 CVs in flight (e.g. with ``asyncio.Semaphore(3)``): the MCP server is
-    shared by the whole class.
-    """
-    ### YOUR CODE HERE
-    _ = agent
-    return {name: None for name in cvs}
+    results = await asyncio.gather(*(one(n, t) for n, t in cvs.items()))
+    return dict(results)
 
 
 # Everything below is provided runner/scoring code. No edits are needed.
